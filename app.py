@@ -77,31 +77,48 @@ def handle_webhook():
     try:
         server_ip = request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0]
         
-        # STEP 1: Get Universe ID from Place ID using multiget-place-details
-        place_res = requests.get(
-            f"https://games.roblox.com/v1/games/multiget-place-details?placeIds={place_id}",
-            timeout=5
-        ).json()
+        # Get place details
+        place_url = f"https://games.roblox.com/v1/games/multiget-place-details?placeIds={place_id}"
+        place_res = requests.get(place_url, timeout=5).json()
         
-        if not place_res or len(place_res) == 0:
-            logger.error(f"❌ Place {place_id} not found")
+        # LOG THE ACTUAL RESPONSE
+        logger.info(f"🔍 API Response Type: {type(place_res)}")
+        logger.info(f"🔍 API Response: {place_res}")
+        
+        # Handle different response formats
+        if isinstance(place_res, list):
+            if len(place_res) == 0:
+                logger.error(f"❌ Empty list for place {place_id}")
+                return jsonify({"status": "skipped"}), 200
+            place_info = place_res[0]
+        elif isinstance(place_res, dict):
+            if 'data' in place_res:
+                if len(place_res['data']) == 0:
+                    logger.error(f"❌ Empty data for place {place_id}")
+                    return jsonify({"status": "skipped"}), 200
+                place_info = place_res['data'][0]
+            else:
+                logger.error(f"❌ Unexpected dict format: {place_res}")
+                return jsonify({"status": "skipped"}), 200
+        else:
+            logger.error(f"❌ Unknown response type: {type(place_res)}")
             return jsonify({"status": "skipped"}), 200
         
-        place_info = place_res[0]
         u_id = place_info.get('universeId')
         game_name = place_info.get('name', 'Unknown')
         game_desc = place_info.get('description', '')
         
-        logger.info(f"✅ Found: {game_name} | Universe: {u_id}")
+        if not u_id:
+            logger.error(f"❌ No universeId in response")
+            return jsonify({"status": "skipped"}), 200
         
-        # STEP 2: Get detailed game info using Universe ID
-        game_res = requests.get(
-            f"https://games.roblox.com/v1/games?universeIds={u_id}",
-            timeout=5
-        ).json()
+        logger.info(f"✅ {game_name} | Universe: {u_id}")
+        
+        # Get game info
+        game_res = requests.get(f"https://games.roblox.com/v1/games?universeIds={u_id}", timeout=5).json()
         
         if 'data' not in game_res or len(game_res['data']) == 0:
-            logger.error(f"❌ No game data for universe {u_id}")
+            logger.error(f"❌ No game data")
             return jsonify({"status": "skipped"}), 200
         
         game_data = game_res['data'][0]
@@ -110,70 +127,61 @@ def handle_webhook():
         favorites = game_data.get('favoritedCount', 0)
         updated = game_data.get('updated', 'Unknown')
         
-        # STEP 3: Get votes
+        # Get votes
         try:
             v_res = requests.get(f"https://games.roblox.com/v1/games/votes?universeIds={u_id}", timeout=5).json()
             votes = v_res['data'][0] if 'data' in v_res and v_res['data'] else {'upVotes': 0}
         except:
             votes = {'upVotes': 0}
         
-        # STEP 4: Get thumbnails
+        # Get thumbnails
         try:
-            icon_res = requests.get(
-                f"https://thumbnails.roblox.com/v1/games/icons?universeIds={u_id}&size=256x256&format=Png&isCircular=false",
-                timeout=5
-            ).json()
+            icon_res = requests.get(f"https://thumbnails.roblox.com/v1/games/icons?universeIds={u_id}&size=256x256&format=Png&isCircular=false", timeout=5).json()
             icon = icon_res['data'][0]['imageUrl'] if 'data' in icon_res and icon_res['data'] else 'https://via.placeholder.com/256'
         except:
             icon = 'https://via.placeholder.com/256'
         
         try:
-            thumb_res = requests.get(
-                f"https://thumbnails.roblox.com/v1/games/multiget/thumbnails?universeIds={u_id}&size=768x432&format=Png",
-                timeout=5
-            ).json()
+            thumb_res = requests.get(f"https://thumbnails.roblox.com/v1/games/multiget/thumbnails?universeIds={u_id}&size=768x432&format=Png", timeout=5).json()
             thumb = thumb_res['data'][0]['thumbnails'][0]['imageUrl'] if 'data' in thumb_res and thumb_res['data'] and thumb_res['data'][0].get('thumbnails') else 'https://via.placeholder.com/768x432'
         except:
             thumb = 'https://via.placeholder.com/768x432'
 
-        # STEP 5: Tiered webhook routing
+        # Tiered webhook
         if active >= 500: target = WEBHOOKS["tier4"]
         elif active >= 100: target = WEBHOOKS["tier3"]
         elif active >= 50: target = WEBHOOKS["tier2"]
         else: target = WEBHOOKS["tier1"]
 
         if not target:
-            logger.error(f"❌ No webhook configured")
             return jsonify({"error": "Webhook not configured"}), 500
 
-        # STEP 6: Send to Discord
+        # Send to Discord
         payload = {
             "embeds": [{
-                "author": {"name": "Luminar Project | Intelligence", "icon_url": icon},
-                "title": f"🚀 Server Detected: {game_name}",
+                "author": {"name": "Luminar Project", "icon_url": icon},
+                "title": f"🚀 {game_name}",
                 "url": f"https://www.roblox.com/games/{place_id}",
                 "description": game_desc[:200] + "..." if len(game_desc) > 200 else game_desc,
                 "color": 0xAC00FF,
                 "image": {"url": thumb},
                 "thumbnail": {"url": icon},
                 "fields": [
-                    {"name": "🌐 Server Location", "value": f"**IP:** `{server_ip}`\n{get_location(server_ip)}", "inline": False},
-                    {"name": "👥 Population", "value": f"**Total Active:** {active:,}\n**Current Server:** {data.get('playerCount', '?')}/{data.get('maxPlayers', '?')}", "inline": True},
-                    {"name": "📊 Statistics", "value": f"**Visits:** {visits:,}\n**Favorites:** {favorites:,}\n**Upvotes:** {votes.get('upVotes', 0):,}", "inline": True},
-                    {"name": "💻 Executor Join", "value": f"```js\nRoblox.GameLauncher.joinGameInstance({place_id}, '{job_id}');\n```", "inline": False}
+                    {"name": "🌐 Location", "value": f"`{server_ip}`\n{get_location(server_ip)}", "inline": False},
+                    {"name": "👥 Players", "value": f"**Active:** {active:,}\n**Server:** {data.get('playerCount', '?')}/{data.get('maxPlayers', '?')}", "inline": True},
+                    {"name": "📊 Stats", "value": f"**Visits:** {visits:,}\n**Favorites:** {favorites:,}", "inline": True},
+                    {"name": "💻 Join", "value": f"```js\nRoblox.GameLauncher.joinGameInstance({place_id}, '{job_id}');\n```", "inline": False}
                 ],
-                "footer": {"text": f"Last Updated: {updated[:10]} • JobID: {job_id}"}
+                "footer": {"text": f"Updated: {updated[:10]} • {job_id}"}
             }]
         }
 
         res = rate_limited_webhook(target, payload)
         
         if res.status_code in [200, 204]:
-            logger.info(f"✅ Webhook sent | {game_name} | {active} players")
-        elif res.status_code == 429:
-            logger.warning(f"⚠️ Rate limited")
+            logger.info(f"✅ Sent | {game_name}")
         else:
-            logger.error(f"❌ Webhook failed: {res.status_code}")
+            logger.error(f"❌ Failed: {res.status_code}")
         
         return jsonify({"status": "success"}), 200
 
