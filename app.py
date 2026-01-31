@@ -16,6 +16,15 @@ WEBHOOKS = {
     "tier4": os.environ.get('WEBHOOK_INFINITY')
 }
 
+# Log webhook URLs on startup
+logger.info("=" * 50)
+logger.info("WEBHOOK CONFIGURATION:")
+logger.info(f"Tier 1 (0-50): {'SET' if WEBHOOKS['tier1'] else 'NOT SET'}")
+logger.info(f"Tier 2 (50-100): {'SET' if WEBHOOKS['tier2'] else 'NOT SET'}")
+logger.info(f"Tier 3 (100-500): {'SET' if WEBHOOKS['tier3'] else 'NOT SET'}")
+logger.info(f"Tier 4 (500+): {'SET' if WEBHOOKS['tier4'] else 'NOT SET'}")
+logger.info("=" * 50)
+
 webhook_queues = {}
 webhook_locks = {}
 
@@ -32,6 +41,7 @@ def rate_limited_webhook(webhook_url, payload):
         if len(webhook_queues[webhook_url]) >= 5:
             sleep_time = 5 - (now - webhook_queues[webhook_url][0])
             if sleep_time > 0:
+                logger.info(f"⏳ Waiting {sleep_time:.1f}s for rate limit")
                 time.sleep(sleep_time)
                 webhook_queues[webhook_url].popleft()
         
@@ -86,7 +96,11 @@ def handle_webhook():
         
         # Step 1: Get Universe ID
         universe_res = requests.get(f"https://apis.roblox.com/universes/v1/places/{place_id}/universe", timeout=5)
-        universe_res.raise_for_status()
+        
+        if universe_res.status_code != 200:
+            logger.warning(f"⚠️ Universe API returned {universe_res.status_code}")
+            return jsonify({"status": "skipped"}), 200
+            
         universe_id = universe_res.json().get('universeId')
         
         if not universe_id:
@@ -95,8 +109,21 @@ def handle_webhook():
         
         # Step 2: Get game details
         game_res = requests.get(f"https://games.roblox.com/v1/games?universeIds={universe_id}", timeout=5)
-        game_res.raise_for_status()
-        game_data = game_res.json()['data'][0]
+        
+        if game_res.status_code == 403:
+            logger.warning(f"⚠️ Roblox blocked (403) - skipping")
+            return jsonify({"status": "skipped"}), 200
+        
+        if game_res.status_code != 200:
+            logger.warning(f"⚠️ Game API returned {game_res.status_code}")
+            return jsonify({"status": "skipped"}), 200
+        
+        game_json = game_res.json()
+        if 'data' not in game_json or len(game_json['data']) == 0:
+            logger.warning(f"⚠️ No game data")
+            return jsonify({"status": "skipped"}), 200
+            
+        game_data = game_json['data'][0]
         
         game_name = game_data.get('name', 'Unknown')
         game_desc = game_data.get('description', '') or ''
@@ -111,8 +138,10 @@ def handle_webhook():
         upvotes = 0
         try:
             votes_res = requests.get(f"https://games.roblox.com/v1/games/votes?universeIds={universe_id}", timeout=5)
-            votes_res.raise_for_status()
-            upvotes = votes_res.json()['data'][0].get('upVotes', 0)
+            if votes_res.status_code == 200:
+                votes_json = votes_res.json()
+                if 'data' in votes_json and len(votes_json['data']) > 0:
+                    upvotes = votes_json['data'][0].get('upVotes', 0)
         except:
             pass
         
@@ -120,8 +149,12 @@ def handle_webhook():
         thumbnail_url = "https://via.placeholder.com/768x432"
         try:
             thumb_res = requests.get(f"https://thumbnails.roblox.com/v1/games/multiget/thumbnails?universeIds={universe_id}&countPerUniverse=1&defaults=true&size=768x432&format=Png&isCircular=false", timeout=5)
-            thumb_res.raise_for_status()
-            thumbnail_url = thumb_res.json()['data'][0]['thumbnails'][0]['imageUrl']
+            if thumb_res.status_code == 200:
+                thumb_json = thumb_res.json()
+                if 'data' in thumb_json and len(thumb_json['data']) > 0:
+                    thumbs = thumb_json['data'][0].get('thumbnails', [])
+                    if thumbs:
+                        thumbnail_url = thumbs[0]['imageUrl']
         except:
             pass
         
@@ -129,18 +162,31 @@ def handle_webhook():
         icon_url = "https://via.placeholder.com/256"
         try:
             icon_res = requests.get(f"https://thumbnails.roblox.com/v1/games/icons?universeIds={universe_id}&size=256x256&format=Png&isCircular=false", timeout=5)
-            icon_res.raise_for_status()
-            icon_url = icon_res.json()['data'][0]['imageUrl']
+            if icon_res.status_code == 200:
+                icon_json = icon_res.json()
+                if 'data' in icon_json and len(icon_json['data']) > 0:
+                    icon_url = icon_json['data'][0]['imageUrl']
         except:
             pass
         
         # Tiered webhook
-        if playing >= 500: target = WEBHOOKS["tier4"]
-        elif playing >= 100: target = WEBHOOKS["tier3"]
-        elif playing >= 50: target = WEBHOOKS["tier2"]
-        else: target = WEBHOOKS["tier1"]
+        if playing >= 500: 
+            target = WEBHOOKS["tier4"]
+            tier_name = "Tier 4 (500+)"
+        elif playing >= 100: 
+            target = WEBHOOKS["tier3"]
+            tier_name = "Tier 3 (100-500)"
+        elif playing >= 50: 
+            target = WEBHOOKS["tier2"]
+            tier_name = "Tier 2 (50-100)"
+        else: 
+            target = WEBHOOKS["tier1"]
+            tier_name = "Tier 1 (0-50)"
+
+        logger.info(f"🎯 Using {tier_name} for {playing} players")
 
         if not target:
+            logger.error(f"❌ No webhook URL set for {tier_name}!")
             return jsonify({"error": "No webhook configured"}), 500
 
         # Build embed
@@ -170,14 +216,17 @@ def handle_webhook():
             }]
         }
 
+        logger.info(f"📤 Sending webhook to Discord...")
         res = rate_limited_webhook(target, payload)
         
+        logger.info(f"📬 Discord response: {res.status_code}")
         if res.status_code in [200, 204]:
-            logger.info(f"✅ Sent to Discord")
+            logger.info(f"✅ Webhook delivered successfully!")
         elif res.status_code == 429:
-            logger.warning(f"⚠️ Rate limited")
+            logger.warning(f"⚠️ Discord rate limited (429) - too many requests")
+            logger.warning(f"⚠️ Response: {res.text}")
         else:
-            logger.error(f"❌ Failed: {res.status_code}")
+            logger.error(f"❌ Discord returned {res.status_code}: {res.text}")
         
         return jsonify({"status": "success"}), 200
 
