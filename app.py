@@ -8,21 +8,23 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("LuminarProject")
 
-AUTH_SECRET = os.environ.get('AUTH_SECRET')
+AUTH_SECRET = "Luminar"
 WEBHOOKS = {
-    "tier1": os.environ.get('WEBHOOK_0_50'),
-    "tier2": os.environ.get('WEBHOOK_50_100'),
-    "tier3": os.environ.get('WEBHOOK_100_500'),
-    "tier4": os.environ.get('WEBHOOK_INFINITY')
+    "tier1": os.environ.get('WEBHOOK_0_20'),      # 0-20 players
+    "tier2": os.environ.get('WEBHOOK_20_50'),     # 20-50 players
+    "tier3": os.environ.get('WEBHOOK_50_100'),    # 50-100 players
+    "tier4": os.environ.get('WEBHOOK_100_500'),   # 100-500 players
+    "tier5": os.environ.get('WEBHOOK_500_PLUS')   # 500+ players
 }
 
 # Log webhook URLs on startup
 logger.info("=" * 50)
 logger.info("WEBHOOK CONFIGURATION:")
-logger.info(f"Tier 1 (0-50): {'SET' if WEBHOOKS['tier1'] else 'NOT SET'}")
-logger.info(f"Tier 2 (50-100): {'SET' if WEBHOOKS['tier2'] else 'NOT SET'}")
-logger.info(f"Tier 3 (100-500): {'SET' if WEBHOOKS['tier3'] else 'NOT SET'}")
-logger.info(f"Tier 4 (500+): {'SET' if WEBHOOKS['tier4'] else 'NOT SET'}")
+logger.info(f"Tier 1 (0-20): {'SET' if WEBHOOKS['tier1'] else 'NOT SET'}")
+logger.info(f"Tier 2 (20-50): {'SET' if WEBHOOKS['tier2'] else 'NOT SET'}")
+logger.info(f"Tier 3 (50-100): {'SET' if WEBHOOKS['tier3'] else 'NOT SET'}")
+logger.info(f"Tier 4 (100-500): {'SET' if WEBHOOKS['tier4'] else 'NOT SET'}")
+logger.info(f"Tier 5 (500+): {'SET' if WEBHOOKS['tier5'] else 'NOT SET'}")
 logger.info("=" * 50)
 
 webhook_queues = {}
@@ -169,19 +171,27 @@ def handle_webhook():
         except:
             pass
         
-        # Tiered webhook
-        if playing >= 500: 
+        # Tiered webhook (0-20, 20-50, 50-100, 100-500, 500+)
+        if playing >= 500:
+            target = WEBHOOKS["tier5"]
+            tier_name = "🔴 Tier 5 (500+)"
+            tier_color = 0xFF0000  # Red
+        elif playing >= 100:
             target = WEBHOOKS["tier4"]
-            tier_name = "Tier 4 (500+)"
-        elif playing >= 100: 
+            tier_name = "🟠 Tier 4 (100-500)"
+            tier_color = 0xFF6B00  # Orange
+        elif playing >= 50:
             target = WEBHOOKS["tier3"]
-            tier_name = "Tier 3 (100-500)"
-        elif playing >= 50: 
+            tier_name = "🟡 Tier 3 (50-100)"
+            tier_color = 0xFFD700  # Gold
+        elif playing >= 20:
             target = WEBHOOKS["tier2"]
-            tier_name = "Tier 2 (50-100)"
-        else: 
+            tier_name = "🟢 Tier 2 (20-50)"
+            tier_color = 0x00FF00  # Green
+        else:
             target = WEBHOOKS["tier1"]
-            tier_name = "Tier 1 (0-50)"
+            tier_name = "🔵 Tier 1 (0-20)"
+            tier_color = 0x0099FF  # Blue
 
         logger.info(f"🎯 Using {tier_name} for {playing} players")
 
@@ -189,30 +199,79 @@ def handle_webhook():
             logger.error(f"❌ No webhook URL set for {tier_name}!")
             return jsonify({"error": "No webhook configured"}), 500
 
-        # Build embed
+        # Build embed with enhanced info
         js_code = f"```js\nRoblox.GameLauncher.joinGameInstance({place_id}, \"{job_id}\");\n```"
         
-        desc_text = game_desc[:200] + "..." if len(game_desc) > 200 else game_desc
+        desc_text = game_desc[:250] + "..." if len(game_desc) > 250 else game_desc
+        
+        # Calculate engagement metrics
+        engagement_rate = ((upvotes + favorites) / (visits + 1)) * 100 if visits > 0 else 0
+        players_percentage = (player_count / max_players * 100) if max_players > 0 else 0
+        
+        # Player status indicator
+        if player_count == max_players:
+            status_indicator = "🔴 FULL"
+        elif players_percentage >= 80:
+            status_indicator = "🟠 ALMOST FULL"
+        elif players_percentage >= 50:
+            status_indicator = "🟡 MEDIUM"
+        else:
+            status_indicator = "🟢 AVAILABLE"
         
         payload = {
             "embeds": [{
                 "author": {
-                    "name": "Luminar Project | Intelligence",
-                    "icon_url": icon_url
+                    "name": "⚡ LUMINAR PROJECT | SERVER INTELLIGENCE",
+                    "icon_url": icon_url,
+                    "url": f"https://www.roblox.com/games/{place_id}"
                 },
-                "title": f"🚀 Premium Server Log: {game_name}",
+                "title": f"🎮 {game_name}",
                 "url": f"https://www.roblox.com/games/{place_id}",
-                "description": desc_text,
-                "color": 0xAC00FF,
+                "description": f"*{desc_text}*\n\n**SERVER TIER:** {tier_name}",
+                "color": tier_color,
                 "thumbnail": {"url": icon_url},
                 "image": {"url": thumbnail_url},
                 "fields": [
-                    {"name": "🌐 Server Location", "value": f"**IP:** `{server_ip}`\n{get_location(server_ip)}", "inline": False},
-                    {"name": "👥 Population", "value": f"**Total Active:** {format_number(playing)}\n**Current Server:** {player_count}/{max_players}", "inline": True},
-                    {"name": "📊 Statistics", "value": f"**Visits:** {format_number(visits)}\n**Favorites:** {format_number(favorites)}\n**Upvotes:** {format_number(upvotes)}", "inline": True},
-                    {"name": "💻 Executor Join", "value": js_code, "inline": False}
+                    {
+                        "name": "🌐 SERVER INFORMATION",
+                        "value": f"**IP Address:** `{server_ip}`\n{get_location(server_ip)}\n**Server Status:** {status_indicator}",
+                        "inline": False
+                    },
+                    {
+                        "name": "👥 POPULATION METRICS",
+                        "value": f"**Global Active:** {format_number(playing):>6}\n**Current Server:** {player_count}/{max_players} ({players_percentage:.1f}%)\n**Total Visits:** {format_number(visits):>6}",
+                        "inline": True
+                    },
+                    {
+                        "name": "⭐ ENGAGEMENT STATS",
+                        "value": f"**Favorites:** {format_number(favorites):>6}\n**Upvotes:** {format_number(upvotes):>6}\n**Engagement:** {engagement_rate:.2f}%",
+                        "inline": True
+                    },
+                    {
+                        "name": "🔧 TECHNICAL DATA",
+                        "value": f"**Place ID:** `{place_id}`\n**Universe ID:** `{universe_id}`\n**Job ID:** `{job_id}`",
+                        "inline": True
+                    },
+                    {
+                        "name": "📅 TIMESTAMP",
+                        "value": f"**Last Updated:** {updated[:10]}\n**Detection Time:** {time.strftime('%Y-%m-%d %H:%M:%S')} UTC",
+                        "inline": True
+                    },
+                    {
+                        "name": "💻 EXECUTOR JOIN CODE",
+                        "value": js_code,
+                        "inline": False
+                    },
+                    {
+                        "name": "🔗 QUICK LINKS",
+                        "value": f"[🎮 Play Game](https://www.roblox.com/games/{place_id}) • [👀 Universe](https://www.roblox.com/universes/{universe_id}) • [📊 Analytics](https://www.roblox.com/games/{place_id}/analytics)",
+                        "inline": False
+                    }
                 ],
-                "footer": {"text": f"Last Updated: {updated[:10]} • JobID: {job_id}"}
+                "footer": {
+                    "text": f"Luminar Intelligence System • Tier {tier_name} Detection",
+                    "icon_url": icon_url
+                }
             }]
         }
 
