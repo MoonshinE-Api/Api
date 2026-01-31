@@ -8,6 +8,15 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("LuminarProject")
 
+# Headers to avoid Roblox 403 blocking
+REQUEST_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer': 'https://www.roblox.com/',
+    'Origin': 'https://www.roblox.com'
+}
+
 AUTH_SECRET = "Luminar"
 WEBHOOKS = {
     "tier1": os.environ.get('WEBHOOK_0_20'),      # 0-20 players
@@ -97,7 +106,7 @@ def handle_webhook():
         server_ip = request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0]
         
         # Step 1: Get Universe ID
-        universe_res = requests.get(f"https://apis.roblox.com/universes/v1/places/{place_id}/universe", timeout=5)
+        universe_res = requests.get(f"https://apis.roblox.com/universes/v1/places/{place_id}/universe", timeout=5, headers=REQUEST_HEADERS)
         
         if universe_res.status_code != 200:
             logger.warning(f"⚠️ Universe API returned {universe_res.status_code}")
@@ -109,16 +118,35 @@ def handle_webhook():
             logger.error(f"❌ No universeId for {place_id}")
             return jsonify({"status": "skipped"}), 200
         
-        # Step 2: Get game details
-        game_res = requests.get(f"https://games.roblox.com/v1/games?universeIds={universe_id}", timeout=5)
-        
-        if game_res.status_code == 403:
-            logger.warning(f"⚠️ Roblox blocked (403) - skipping")
-            return jsonify({"status": "skipped"}), 200
-        
-        if game_res.status_code != 200:
-            logger.warning(f"⚠️ Game API returned {game_res.status_code}")
-            return jsonify({"status": "skipped"}), 200
+        # Step 2: Get game details with retry logic
+        game_res = None
+        for attempt in range(3):
+            try:
+                game_res = requests.get(f"https://games.roblox.com/v1/games?universeIds={universe_id}", timeout=10, headers=REQUEST_HEADERS)
+                
+                if game_res.status_code == 403:
+                    if attempt < 2:
+                        wait_time = 2 ** attempt
+                        logger.warning(f"⚠️ Roblox blocked (403) - retrying in {wait_time}s (attempt {attempt + 1}/3)...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logger.warning(f"⚠️ Roblox blocked (403) after 3 attempts - skipping")
+                        return jsonify({"status": "skipped"}), 200
+                
+                if game_res.status_code != 200:
+                    logger.warning(f"⚠️ Game API returned {game_res.status_code}")
+                    return jsonify({"status": "skipped"}), 200
+                
+                break
+            except requests.exceptions.Timeout:
+                if attempt < 2:
+                    logger.warning(f"⚠️ Request timeout - retrying (attempt {attempt + 1}/3)...")
+                    time.sleep(2 ** attempt)
+                    continue
+                else:
+                    logger.error(f"❌ Request timeout after 3 attempts")
+                    return jsonify({"status": "skipped"}), 200
         
         game_json = game_res.json()
         if 'data' not in game_json or len(game_json['data']) == 0:
@@ -139,7 +167,7 @@ def handle_webhook():
         # Step 3: Get votes
         upvotes = 0
         try:
-            votes_res = requests.get(f"https://games.roblox.com/v1/games/votes?universeIds={universe_id}", timeout=5)
+            votes_res = requests.get(f"https://games.roblox.com/v1/games/votes?universeIds={universe_id}", timeout=10, headers=REQUEST_HEADERS)
             if votes_res.status_code == 200:
                 votes_json = votes_res.json()
                 if 'data' in votes_json and len(votes_json['data']) > 0:
@@ -150,7 +178,7 @@ def handle_webhook():
         # Step 4: Get thumbnail
         thumbnail_url = "https://via.placeholder.com/768x432"
         try:
-            thumb_res = requests.get(f"https://thumbnails.roblox.com/v1/games/multiget/thumbnails?universeIds={universe_id}&countPerUniverse=1&defaults=true&size=768x432&format=Png&isCircular=false", timeout=5)
+            thumb_res = requests.get(f"https://thumbnails.roblox.com/v1/games/multiget/thumbnails?universeIds={universe_id}&countPerUniverse=1&defaults=true&size=768x432&format=Png&isCircular=false", timeout=10, headers=REQUEST_HEADERS)
             if thumb_res.status_code == 200:
                 thumb_json = thumb_res.json()
                 if 'data' in thumb_json and len(thumb_json['data']) > 0:
@@ -163,7 +191,7 @@ def handle_webhook():
         # Step 5: Get icon
         icon_url = "https://via.placeholder.com/256"
         try:
-            icon_res = requests.get(f"https://thumbnails.roblox.com/v1/games/icons?universeIds={universe_id}&size=256x256&format=Png&isCircular=false", timeout=5)
+            icon_res = requests.get(f"https://thumbnails.roblox.com/v1/games/icons?universeIds={universe_id}&size=256x256&format=Png&isCircular=false", timeout=10, headers=REQUEST_HEADERS)
             if icon_res.status_code == 200:
                 icon_json = icon_res.json()
                 if 'data' in icon_json and len(icon_json['data']) > 0:
