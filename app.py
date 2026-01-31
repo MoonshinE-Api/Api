@@ -1,13 +1,13 @@
 import os, hashlib, time, requests, logging
 from flask import Flask, request, jsonify
+from collections import deque
+from threading import Lock
 
 app = Flask(__name__)
 
-# --- CONFIGURE LOGGING ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("LuminarProject")
 
-# --- LUMINAR CONFIGURATION ---
 AUTH_SECRET = os.environ.get('AUTH_SECRET')
 WEBHOOKS = {
     "tier1": os.environ.get('WEBHOOK_0_50'),
@@ -16,9 +16,32 @@ WEBHOOKS = {
     "tier4": os.environ.get('WEBHOOK_INFINITY')
 }
 
-# Check if Env Vars are loaded correctly on startup
+webhook_queues = {}
+webhook_locks = {}
+
+def rate_limited_webhook(webhook_url, payload):
+    if webhook_url not in webhook_queues:
+        webhook_queues[webhook_url] = deque(maxlen=5)
+        webhook_locks[webhook_url] = Lock()
+    
+    with webhook_locks[webhook_url]:
+        now = time.time()
+        
+        while webhook_queues[webhook_url] and now - webhook_queues[webhook_url][0] > 5:
+            webhook_queues[webhook_url].popleft()
+        
+        if len(webhook_queues[webhook_url]) >= 5:
+            sleep_time = 5 - (now - webhook_queues[webhook_url][0])
+            if sleep_time > 0:
+                logger.info(f"⏳ Rate limit: sleeping {sleep_time:.2f}s")
+                time.sleep(sleep_time)
+                webhook_queues[webhook_url].popleft()
+        
+        webhook_queues[webhook_url].append(time.time())
+        return requests.post(webhook_url, json=payload, timeout=5)
+
 if not AUTH_SECRET:
-    logger.error("❌ CRITICAL: AUTH_SECRET is not set in Render Environment Variables!")
+    logger.error("❌ CRITICAL: AUTH_SECRET is not set!")
 
 def get_location(ip):
     try:
@@ -29,115 +52,125 @@ def get_location(ip):
     return "Unknown Location"
 
 def verify_luminar_security(provided_hash):
-    """Checks the hash and logs the comparison for debugging."""
     if not provided_hash:
-        logger.warning("⚠️ No hash provided in request headers (X-Luminar-Auth is missing)")
         return False
         
     current_min = time.gmtime().tm_min
-    # Checking current minute and 2 minutes prior
     minutes_to_check = [current_min, (current_min - 1) % 60, (current_min - 2) % 60]
-    
-    logger.info(f"--- Hash Verification Debug ---")
-    logger.info(f"Received Hash: {provided_hash}")
     
     for m in minutes_to_check:
         raw_string = f"{AUTH_SECRET}:{m}"
         expected = hashlib.sha256(raw_string.encode()).hexdigest()
-        logger.info(f"Minute {m} | Expected: {expected}")
-        
         if provided_hash == expected:
-            logger.info(f"✅ Hash Match Found for minute {m}!")
             return True
-            
-    logger.error("❌ Hash Mismatch! None of the calculated hashes matched the provided hash.")
+    
     return False
+
+def get_game_info_alternative(place_id):
+    """Try multiple methods to get game info"""
+    
+    # Method 1: Try direct place details API
+    try:
+        logger.info(f"🔍 Method 1: Trying place details API for {place_id}")
+        res = requests.get(f"https://games.roblox.com/v1/games/multiget-place-details?placeIds={place_id}", timeout=5).json()
+        
+        if res and len(res) > 0:
+            place_info = res[0]
+            logger.info(f"✅ Method 1 Success: {place_info}")
+            return place_info
+    except Exception as e:
+        logger.warning(f"⚠️ Method 1 failed: {e}")
+    
+    # Method 2: Try universe lookup then game details
+    try:
+        logger.info(f"🔍 Method 2: Trying universe lookup for {place_id}")
+        u_res = requests.get(f"https://apis.roblox.com/universes/v1/places/{place_id}/universe", timeout=5).json()
+        u_id = u_res.get('universeId')
+        
+        if u_id:
+            logger.info(f"✅ Found universeId: {u_id}")
+            g_res = requests.get(f"https://games.roblox.com/v1/games?universeIds={u_id}", timeout=5).json()
+            
+            if 'data' in g_res and len(g_res['data']) > 0:
+                logger.info(f"✅ Method 2 Success: {g_res['data'][0]}")
+                return {**g_res['data'][0], 'universeId': u_id}
+    except Exception as e:
+        logger.warning(f"⚠️ Method 2 failed: {e}")
+    
+    # Method 3: Try v2 API
+    try:
+        logger.info(f"🔍 Method 3: Trying v2 API for {place_id}")
+        res = requests.get(f"https://games.roblox.com/v2/games/{place_id}/media", timeout=5).json()
+        logger.info(f"V2 Response: {res}")
+    except Exception as e:
+        logger.warning(f"⚠️ Method 3 failed: {e}")
+    
+    return None
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
     data = request.json
     provided_hash = request.headers.get('X-Luminar-Auth')
     
-    # Log the basic request info
     place_id = data.get('placeId', 'Unknown')
     job_id = data.get('jobId', 'Studio/No-Job-Id')
-    logger.info(f"Incoming Request | Place: {place_id} | JobId: {job_id}")
+    logger.info(f"📥 Request | Place: {place_id} | Job: {job_id}")
 
-    # 1. Security Check with Logging
     if not verify_luminar_security(provided_hash):
-        return jsonify({"error": "Unauthorized Security Breach", "debug": "Check server logs for hash comparison"}), 401
+        return jsonify({"error": "Unauthorized"}), 401
 
     try:
         server_ip = request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0]
         
-        # 2. Fetch Deep Info with error handling
-        try:
-            u_req = requests.get(f"https://apis.roblox.com/universes/v1/places/{place_id}/universe", timeout=5).json()
-            u_id = u_req.get('universeId')
-            
-            if not u_id:
-                logger.error(f"❌ Failed to get universeId for place {place_id}")
-                return jsonify({"error": "Invalid Place ID"}), 400
-                
-        except Exception as e:
-            logger.error(f"❌ Universe API Error: {str(e)}")
-            return jsonify({"error": "Failed to fetch universe info"}), 500
+        # Try to get game info using multiple methods
+        game_data = get_game_info_alternative(place_id)
         
-        try:
-            g_info_req = requests.get(f"https://games.roblox.com/v1/games?universeIds={u_id}", timeout=5).json()
-            if 'data' not in g_info_req or len(g_info_req['data']) == 0:
-                logger.error(f"❌ Game info API returned no data for universe {u_id}")
-                return jsonify({"error": "Game info not found"}), 404
-            g_info = g_info_req['data'][0]
-        except Exception as e:
-            logger.error(f"❌ Game Info API Error: {str(e)}")
-            return jsonify({"error": "Failed to fetch game info"}), 500
-            
+        if not game_data:
+            logger.error(f"❌ All methods failed for place {place_id}")
+            return jsonify({"status": "skipped", "reason": "could not fetch game data"}), 200
+        
+        u_id = game_data.get('universeId') or game_data.get('id')
+        game_name = game_data.get('name', 'Unknown Game')
+        active = game_data.get('playing', 0)
+        favorites = game_data.get('favoritedCount', 0)
+        
+        logger.info(f"✅ Game Data: {game_name} | Universe: {u_id} | Active: {active}")
+        
+        # Fetch votes
         try:
             v_info_req = requests.get(f"https://games.roblox.com/v1/games/votes?universeIds={u_id}", timeout=5).json()
-            if 'data' not in v_info_req or len(v_info_req['data']) == 0:
-                v_info = {'upVotes': 0, 'downVotes': 0}
-                logger.warning(f"⚠️ No vote data for universe {u_id}, using defaults")
-            else:
-                v_info = v_info_req['data'][0]
-        except Exception as e:
-            logger.warning(f"⚠️ Vote API Error: {str(e)}, using defaults")
-            v_info = {'upVotes': 0, 'downVotes': 0}
-            
+            v_info = v_info_req['data'][0] if 'data' in v_info_req and v_info_req['data'] else {'upVotes': 0}
+        except:
+            v_info = {'upVotes': 0}
+        
+        # Fetch thumbnails
         try:
             icon_req = requests.get(f"https://thumbnails.roblox.com/v1/games/icons?universeIds={u_id}&size=256x256&format=Png&isCircular=false", timeout=5).json()
-            if 'data' in icon_req and len(icon_req['data']) > 0:
-                icon = icon_req['data'][0].get('imageUrl', 'https://via.placeholder.com/256')
-            else:
-                icon = 'https://via.placeholder.com/256'
+            icon = icon_req['data'][0]['imageUrl'] if 'data' in icon_req and icon_req['data'] else 'https://via.placeholder.com/256'
         except:
             icon = 'https://via.placeholder.com/256'
-            
+        
         try:
             thumb_req = requests.get(f"https://thumbnails.roblox.com/v1/games/multiget/thumbnails?universeIds={u_id}&size=768x432&format=Png", timeout=5).json()
-            if 'data' in thumb_req and len(thumb_req['data']) > 0 and 'thumbnails' in thumb_req['data'][0] and len(thumb_req['data'][0]['thumbnails']) > 0:
-                thumb = thumb_req['data'][0]['thumbnails'][0]['imageUrl']
-            else:
-                thumb = 'https://via.placeholder.com/768x432'
+            thumb = thumb_req['data'][0]['thumbnails'][0]['imageUrl'] if 'data' in thumb_req and thumb_req['data'] and thumb_req['data'][0].get('thumbnails') else 'https://via.placeholder.com/768x432'
         except:
             thumb = 'https://via.placeholder.com/768x432'
 
-        # 3. Tiered Webhook Routing
-        active = g_info.get('playing', 0)
+        # Tiered webhook routing
         if active >= 500: target = WEBHOOKS["tier4"]
         elif active >= 100: target = WEBHOOKS["tier3"]
         elif active >= 50: target = WEBHOOKS["tier2"]
         else: target = WEBHOOKS["tier1"]
 
-        if not target: 
-            logger.error(f"❌ No Webhook URL found for active player count: {active}")
-            return jsonify({"error": "Webhook not set for this tier"}), 500
+        if not target:
+            logger.error(f"❌ No webhook URL configured")
+            return jsonify({"error": "Webhook not configured"}), 500
 
-        # 4. Construct Luminar Embed
+        # Construct embed
         payload = {
             "embeds": [{
                 "author": {"name": "Luminar Project | Intelligence", "icon_url": icon},
-                "title": f"🚀 Premium Server Log: {g_info.get('name', 'Unknown Game')}",
+                "title": f"🚀 Premium Server Log: {game_name}",
                 "url": f"https://www.roblox.com/games/{place_id}",
                 "color": 0xAC00FF,
                 "image": {"url": thumb},
@@ -145,26 +178,26 @@ def handle_webhook():
                 "fields": [
                     {"name": "🌐 Server Location", "value": f"**IP:** `{server_ip}`\n{get_location(server_ip)}", "inline": False},
                     {"name": "👥 Population", "value": f"**Total Active:** {active:,}\n**Current Server:** {data.get('playerCount', '?')}/{data.get('maxPlayers', '?')}", "inline": True},
-                    {"name": "📊 Stats", "value": f"👍 {v_info.get('upVotes', 0):,} | ⭐ {g_info.get('favoritedCount', 0):,}", "inline": True},
+                    {"name": "📊 Stats", "value": f"👍 {v_info.get('upVotes', 0):,} | ⭐ {favorites:,}", "inline": True},
                     {"name": "💻 Executor Join", "value": f"```js\nRoblox.GameLauncher.joinGameInstance({place_id}, '{job_id}');\n```", "inline": False}
                 ],
-                "footer": {"text": f"Luminar Security Active • JobID: {job_id}"}
+                "footer": {"text": f"Luminar Security • JobID: {job_id}"}
             }]
         }
 
-        res = requests.post(target, json=payload, timeout=5)
+        res = rate_limited_webhook(target, payload)
         
-        if res.status_code == 429:
-            logger.warning(f"⚠️ Discord Rate Limit Hit (429)")
-        elif res.status_code == 204 or res.status_code == 200:
-            logger.info(f"✅ Webhook sent to Discord. Status: {res.status_code}")
+        if res.status_code in [200, 204]:
+            logger.info(f"✅ Webhook sent successfully to Discord")
+        elif res.status_code == 429:
+            logger.warning(f"⚠️ Rate limited (429)")
         else:
-            logger.error(f"❌ Discord webhook failed with status: {res.status_code}")
-            
-        return jsonify({"status": "Luminar Log Dispatched"}), 200
+            logger.error(f"❌ Webhook failed: {res.status_code} - {res.text}")
+        
+        return jsonify({"status": "success"}), 200
 
     except Exception as e:
-        logger.error(f"❌ Error processing webhook: {str(e)}")
+        logger.error(f"❌ Error: {e}")
         import traceback
         logger.error(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
