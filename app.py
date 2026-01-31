@@ -5,7 +5,7 @@ from threading import Lock
 
 app = Flask(__name__)
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("LuminarProject")
 
 # Headers to avoid Roblox 403 blocking
@@ -135,7 +135,7 @@ def handle_webhook():
                         return jsonify({"status": "skipped"}), 200
                 
                 if game_res.status_code != 200:
-                    logger.warning(f"⚠️ Game API returned {game_res.status_code}")
+                    logger.warning(f"⚠️ Game API returned {game_res.status_code} - Response: {game_res.text[:200]}")
                     return jsonify({"status": "skipped"}), 200
                 
                 break
@@ -149,8 +149,15 @@ def handle_webhook():
                     return jsonify({"status": "skipped"}), 200
         
         game_json = game_res.json()
-        if 'data' not in game_json or len(game_json['data']) == 0:
-            logger.warning(f"⚠️ No game data")
+        logger.info(f"📊 Game API Response: {game_json}")
+        
+        if 'data' not in game_json:
+            logger.error(f"❌ Missing 'data' key in response. Keys: {game_json.keys()}")
+            return jsonify({"status": "skipped"}), 200
+        
+        if len(game_json['data']) == 0:
+            logger.warning(f"⚠️ No game data in response - universe_id: {universe_id}")
+            logger.debug(f"Full response: {game_json}")
             return jsonify({"status": "skipped"}), 200
             
         game_data = game_json['data'][0]
