@@ -61,161 +61,110 @@ def verify_luminar_security(provided_hash):
     
     return False
 
-def fetch_game_data_from_roblox(place_id):
-    """Fetch game data using Roblox's proxy server (no auth needed)"""
-    
-    # Use Roblox's public proxy
-    headers = {
-        'User-Agent': 'Roblox/WinInet',
-        'Referer': 'https://www.roblox.com/'
-    }
-    
-    # Get Universe ID
-    try:
-        u_res = requests.get(
-            f"https://apis.roblox.com/universes/v1/places/{place_id}/universe",
-            headers=headers,
-            timeout=5
-        ).json()
-        u_id = u_res.get('universeId')
-        
-        if not u_id:
-            logger.error(f"❌ No universeId for place {place_id}")
-            return None
-            
-    except Exception as e:
-        logger.error(f"❌ Universe API error: {e}")
-        return None
-    
-    game_data = {'universeId': u_id}
-    
-    # Get game details
-    try:
-        g_res = requests.get(
-            f"https://games.roblox.com/v1/games?universeIds={u_id}",
-            headers=headers,
-            timeout=5
-        ).json()
-        
-        if 'data' in g_res and len(g_res['data']) > 0:
-            g_info = g_res['data'][0]
-            game_data.update({
-                'name': g_info.get('name', 'Unknown'),
-                'description': g_info.get('description', ''),
-                'playing': g_info.get('playing', 0),
-                'visits': g_info.get('visits', 0),
-                'favorites': g_info.get('favoritedCount', 0),
-                'updated': g_info.get('updated', 'Unknown')
-            })
-    except Exception as e:
-        logger.warning(f"⚠️ Game details error: {e}")
-    
-    # Get votes
-    try:
-        v_res = requests.get(
-            f"https://games.roblox.com/v1/games/votes?universeIds={u_id}",
-            headers=headers,
-            timeout=5
-        ).json()
-        
-        if 'data' in v_res and len(v_res['data']) > 0:
-            game_data['upvotes'] = v_res['data'][0].get('upVotes', 0)
-    except:
-        game_data['upvotes'] = 0
-    
-    # Get icon
-    try:
-        icon_res = requests.get(
-            f"https://thumbnails.roblox.com/v1/games/icons?universeIds={u_id}&size=256x256&format=Png&isCircular=false",
-            headers=headers,
-            timeout=5
-        ).json()
-        
-        if 'data' in icon_res and len(icon_res['data']) > 0:
-            game_data['icon'] = icon_res['data'][0]['imageUrl']
-    except:
-        game_data['icon'] = 'https://via.placeholder.com/256'
-    
-    # Get thumbnail
-    try:
-        thumb_res = requests.get(
-            f"https://thumbnails.roblox.com/v1/games/multiget/thumbnails?universeIds={u_id}&size=768x432&format=Png",
-            headers=headers,
-            timeout=5
-        ).json()
-        
-        if 'data' in thumb_res and len(thumb_res['data']) > 0:
-            thumbs = thumb_res['data'][0].get('thumbnails', [])
-            if thumbs:
-                game_data['thumbnail'] = thumbs[0]['imageUrl']
-    except:
-        game_data['thumbnail'] = 'https://via.placeholder.com/768x432'
-    
-    return game_data
+def format_number(n):
+    if isinstance(n, (int, float)):
+        return f"{n:,}"
+    return "0"
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
     data = request.json
     provided_hash = request.headers.get('X-Luminar-Auth')
     
-    place_id = data.get('placeId', 'Unknown')
-    job_id = data.get('jobId', 'Unknown')
+    place_id = data.get('placeId')
+    job_id = data.get('jobId')
     player_count = data.get('playerCount', 0)
     max_players = data.get('maxPlayers', 0)
     
     logger.info(f"📥 Request | Place: {place_id}")
 
     if not verify_luminar_security(provided_hash):
-        logger.error("❌ Unauthorized")
         return jsonify({"error": "Unauthorized"}), 401
 
     try:
         server_ip = request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0]
         
-        # Fetch all game data from Roblox APIs
-        game_data = fetch_game_data_from_roblox(place_id)
+        # Step 1: Get Universe ID
+        universe_res = requests.get(f"https://apis.roblox.com/universes/v1/places/{place_id}/universe", timeout=5)
+        universe_res.raise_for_status()
+        universe_id = universe_res.json().get('universeId')
         
-        if not game_data:
-            logger.error(f"❌ Could not fetch data for {place_id}")
+        if not universe_id:
+            logger.error(f"❌ No universeId for {place_id}")
             return jsonify({"status": "skipped"}), 200
         
+        # Step 2: Get game details
+        game_res = requests.get(f"https://games.roblox.com/v1/games?universeIds={universe_id}", timeout=5)
+        game_res.raise_for_status()
+        game_data = game_res.json()['data'][0]
+        
         game_name = game_data.get('name', 'Unknown')
-        game_desc = game_data.get('description', '')
-        active = game_data.get('playing', 0)
+        game_desc = game_data.get('description', '') or ''
+        playing = game_data.get('playing', 0)
         visits = game_data.get('visits', 0)
-        favorites = game_data.get('favorites', 0)
-        upvotes = game_data.get('upvotes', 0)
+        favorites = game_data.get('favoritedCount', 0)
         updated = game_data.get('updated', 'Unknown')
-        icon = game_data.get('icon', 'https://via.placeholder.com/256')
-        thumb = game_data.get('thumbnail', 'https://via.placeholder.com/768x432')
         
-        logger.info(f"✅ {game_name} | {active} active players")
+        logger.info(f"✅ {game_name} | {playing} active players")
         
-        # Tiered webhook routing
-        if active >= 500: target = WEBHOOKS["tier4"]
-        elif active >= 100: target = WEBHOOKS["tier3"]
-        elif active >= 50: target = WEBHOOKS["tier2"]
+        # Step 3: Get votes
+        upvotes = 0
+        try:
+            votes_res = requests.get(f"https://games.roblox.com/v1/games/votes?universeIds={universe_id}", timeout=5)
+            votes_res.raise_for_status()
+            upvotes = votes_res.json()['data'][0].get('upVotes', 0)
+        except:
+            pass
+        
+        # Step 4: Get thumbnail
+        thumbnail_url = "https://via.placeholder.com/768x432"
+        try:
+            thumb_res = requests.get(f"https://thumbnails.roblox.com/v1/games/multiget/thumbnails?universeIds={universe_id}&countPerUniverse=1&defaults=true&size=768x432&format=Png&isCircular=false", timeout=5)
+            thumb_res.raise_for_status()
+            thumbnail_url = thumb_res.json()['data'][0]['thumbnails'][0]['imageUrl']
+        except:
+            pass
+        
+        # Step 5: Get icon
+        icon_url = "https://via.placeholder.com/256"
+        try:
+            icon_res = requests.get(f"https://thumbnails.roblox.com/v1/games/icons?universeIds={universe_id}&size=256x256&format=Png&isCircular=false", timeout=5)
+            icon_res.raise_for_status()
+            icon_url = icon_res.json()['data'][0]['imageUrl']
+        except:
+            pass
+        
+        # Tiered webhook
+        if playing >= 500: target = WEBHOOKS["tier4"]
+        elif playing >= 100: target = WEBHOOKS["tier3"]
+        elif playing >= 50: target = WEBHOOKS["tier2"]
         else: target = WEBHOOKS["tier1"]
 
         if not target:
-            logger.error("❌ No webhook configured")
-            return jsonify({"error": "Webhook not configured"}), 500
+            return jsonify({"error": "No webhook configured"}), 500
 
-        # Build Discord embed
+        # Build embed
+        js_code = f"```js\nRoblox.GameLauncher.joinGameInstance({place_id}, \"{job_id}\");\n```"
+        
+        desc_text = game_desc[:200] + "..." if len(game_desc) > 200 else game_desc
+        
         payload = {
             "embeds": [{
-                "author": {"name": "Luminar Project | Intelligence", "icon_url": icon},
+                "author": {
+                    "name": "Luminar Project | Intelligence",
+                    "icon_url": icon_url
+                },
                 "title": f"🚀 Premium Server Log: {game_name}",
                 "url": f"https://www.roblox.com/games/{place_id}",
-                "description": game_desc[:200] + "..." if len(game_desc) > 200 else game_desc,
+                "description": desc_text,
                 "color": 0xAC00FF,
-                "image": {"url": thumb},
-                "thumbnail": {"url": icon},
+                "thumbnail": {"url": icon_url},
+                "image": {"url": thumbnail_url},
                 "fields": [
                     {"name": "🌐 Server Location", "value": f"**IP:** `{server_ip}`\n{get_location(server_ip)}", "inline": False},
-                    {"name": "👥 Population", "value": f"**Total Active:** {active:,}\n**Current Server:** {player_count}/{max_players}", "inline": True},
-                    {"name": "📊 Statistics", "value": f"**Visits:** {visits:,}\n**Favorites:** {favorites:,}\n**Upvotes:** {upvotes:,}", "inline": True},
-                    {"name": "💻 Executor Join", "value": f"```js\nRoblox.GameLauncher.joinGameInstance({place_id}, '{job_id}');\n```", "inline": False}
+                    {"name": "👥 Population", "value": f"**Total Active:** {format_number(playing)}\n**Current Server:** {player_count}/{max_players}", "inline": True},
+                    {"name": "📊 Statistics", "value": f"**Visits:** {format_number(visits)}\n**Favorites:** {format_number(favorites)}\n**Upvotes:** {format_number(upvotes)}", "inline": True},
+                    {"name": "💻 Executor Join", "value": js_code, "inline": False}
                 ],
                 "footer": {"text": f"Last Updated: {updated[:10]} • JobID: {job_id}"}
             }]
@@ -224,11 +173,11 @@ def handle_webhook():
         res = rate_limited_webhook(target, payload)
         
         if res.status_code in [200, 204]:
-            logger.info(f"✅ Webhook sent successfully")
+            logger.info(f"✅ Sent to Discord")
         elif res.status_code == 429:
-            logger.warning(f"⚠️ Rate limited (429)")
+            logger.warning(f"⚠️ Rate limited")
         else:
-            logger.error(f"❌ Webhook failed: {res.status_code}")
+            logger.error(f"❌ Failed: {res.status_code}")
         
         return jsonify({"status": "success"}), 200
 
