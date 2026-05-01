@@ -44,16 +44,24 @@ def handle_webhook():
 
     if not target: return jsonify({"error": "No webhook"}), 500
 
+    # Quick fetch to extract the actual PNG URL from Roblox's JSON response
+    icon_url = "https://i.imgur.com/8N7u7D6.png" # Safe fallback
+    try:
+        icon_req = requests.get(f"https://thumbnails.roproxy.com/v1/games/icons?universeIds={u_id}&size=256x256&format=Png", timeout=3).json()
+        if icon_req.get("data") and len(icon_req["data"]) > 0:
+            icon_url = icon_req["data"][0].get("imageUrl", icon_url)
+    except:
+        pass
+
     # Build the exact embed from image_3c46c4.png
     timestamp = datetime.utcnow().strftime('%d.%m.%Y %H:%M')
-    icon_url = f"https://thumbnails.roproxy.com/v1/games/icons?universeIds={u_id}&size=256x256&format=Png"
     
     payload = {
         "embeds": [{
             "author": {"name": "Luminar - Logs"},
             "title": "Game Log",
             "color": 0xAC00FF,
-            "thumbnail": {"url": icon_url}, # Proxying icon fetch via URL
+            "thumbnail": {"url": icon_url}, # Now sends a real image link
             "description": (
                 "### Game Info ℹ️\n"
                 f"🎮 Game: [{data.get('name')}](https://www.roblox.com/games/{p_id}/)\n"
