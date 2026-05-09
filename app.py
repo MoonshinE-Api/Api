@@ -47,7 +47,7 @@ def handle_webhook():
     # Quick fetch to extract the actual PNG URL from Roblox's JSON response
     icon_url = "https://i.imgur.com/8N7u7D6.png" # Safe fallback
     try:
-        icon_req = requests.get(f"https://thumbnails.roproxy.com/v1/games/icons?universeIds={u_id}&size=256x256&format=Png", timeout=3).json()
+        icon_req = requests.get(f"https://thumbnails.rotunnel.com/v1/games/icons?universeIds={u_id}&size=256x256&format=Png", timeout=3).json()
         if icon_req.get("data") and len(icon_req["data"]) > 0:
             icon_url = icon_req["data"][0].get("imageUrl", icon_url)
     except:
