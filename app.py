@@ -25,6 +25,7 @@ def verify_luminar_security(provided_hash):
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
     data = request.json
+    logger.info(f"Received webhook payload: {data}")
     provided_hash = request.headers.get('X-Luminar-Auth')
     
     if not verify_luminar_security(provided_hash):
@@ -86,7 +87,15 @@ def handle_webhook():
         }]
     }
 
-    requests.post(target, json=payload)
+    try:
+        response = requests.post(target, json=payload, timeout=5)
+        logger.info(f"Discord response status: {response.status_code}")
+        if response.status_code >= 400:
+            logger.error(f"Discord webhook failed! Response: {response.text}")
+            logger.error(f"Sent Payload: {payload}")
+    except Exception as e:
+        logger.error(f"Error sending to Discord webhook: {e}")
+
     return jsonify({"status": "Success"}), 200
 
 if __name__ == '__main__':
